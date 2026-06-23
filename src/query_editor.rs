@@ -187,7 +187,7 @@ pub fn start_query_editor_task(
                                     shared_ctx.set_active_index(Index::Completion).await;
                                     completion_action_tx
                                         .send(CompletionAction::Enter {
-                                            prefix: editor.text(),
+                                            query: editor.text(),
                                         })
                                         .await?;
                                 }

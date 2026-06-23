@@ -3,6 +3,7 @@ use std::{collections::BTreeSet, sync::Arc};
 use promkit_widgets::{
     core::{crossterm::event::Event, grapheme::StyledGraphemes, Widget},
     listbox::{self, Listbox},
+    serde_json,
 };
 use tokio::{
     sync::{mpsc, Mutex, RwLock},
@@ -111,6 +112,16 @@ pub struct CompletionNavigator {
     search_result_chunk_size: usize,
     /// Buffered suggestions that are not yet visible in the listbox.
     remaining_items: Vec<String>,
+    /// Raw input document, for evaluating the base expression of a piped query.
+    input: &'static str,
+    /// Max JSON streams to consider when evaluating the base expression.
+    max_streams: Option<usize>,
+    /// Lazily-parsed input stream, cached so a piped completion does not
+    /// re-deserialize the whole document on every keypress.
+    cached_stream: Option<Vec<serde_json::Value>>,
+    /// Query text up to the start of the segment being completed; prepended to
+    /// each suggestion so the editor keeps the `.foo | ` context intact.
+    preserved_prefix: String,
 }
 
 impl CompletionNavigator {
@@ -118,18 +129,36 @@ impl CompletionNavigator {
         shared_suggestions: SharedSuggestionStore,
         state: listbox::State,
         search_result_chunk_size: usize,
+        input: &'static str,
+        max_streams: Option<usize>,
     ) -> Self {
         Self {
             shared_suggestions,
             state,
             search_result_chunk_size,
             remaining_items: Default::default(),
+            input,
+            max_streams,
+            cached_stream: None,
+            preserved_prefix: String::new(),
         }
     }
 
-    /// Get the currently selected item in listbox.
+    /// Get the currently selected item in listbox, with the preserved query
+    /// prefix prepended so the editor keeps the pre-pipe context.
     fn get_current_item(&self) -> String {
-        self.state.listbox.get().to_string()
+        format!("{}{}", self.preserved_prefix, self.state.listbox.get())
+    }
+
+    /// Parsed input stream, deserialized once on first use and cached. Returns
+    /// an empty slice if the input fails to parse (the caller then offers no
+    /// suggestions rather than crashing).
+    fn input_stream(&mut self) -> &[serde_json::Value] {
+        if self.cached_stream.is_none() {
+            self.cached_stream =
+                Some(json::deserialize(self.input, self.max_streams).unwrap_or_default());
+        }
+        self.cached_stream.as_deref().unwrap_or_default()
     }
 
     /// Create graphemes for rendering the completion navigator.
@@ -198,8 +227,34 @@ impl CompletionNavigator {
         None
     }
 
-    async fn enter(&mut self, prefix: &str) -> (Option<String>, SuggestionLoadProgress) {
-        let (items, progress) = self.shared_suggestions.collect_matches(prefix).await;
+    async fn enter(&mut self, query: &str) -> (Option<String>, SuggestionLoadProgress) {
+        let ctx = crate::completion_ctx::analyze(query);
+        self.preserved_prefix = query[..ctx.segment_start].to_string();
+        let segment = &query[ctx.segment_start..];
+
+        let (items, progress) = if ctx.base.is_empty() {
+            // Root context: use the precomputed, incrementally-loaded path store.
+            self.shared_suggestions.collect_matches(segment).await
+        } else {
+            // Piped/context: evaluate the base expression and enumerate paths of
+            // its output, so suggestions are relative to the piped value.
+            let stream = self.input_stream();
+            let items = match json::relative_paths(&ctx.base, stream) {
+                Ok(mut paths) => {
+                    paths.retain(|p| p.starts_with(segment));
+                    paths.sort();
+                    paths.dedup();
+                    paths
+                }
+                // Base is invalid or still being typed: offer nothing, don't crash.
+                Err(_) => Vec::new(),
+            };
+            let progress = SuggestionLoadProgress {
+                is_complete: true,
+                loaded_path_count: items.len(),
+            };
+            (items, progress)
+        };
         let head_item = self.initialize_session_items(items);
         (head_item, progress)
     }
@@ -218,7 +273,7 @@ impl CompletionNavigator {
             .collect::<Vec<_>>();
         self.remaining_items = items;
         self.state.listbox = Listbox::from(used);
-        Some(self.state.listbox.get().to_string())
+        Some(self.get_current_item())
     }
 
     /// Reset completion session state.
@@ -230,8 +285,8 @@ impl CompletionNavigator {
 }
 
 pub enum CompletionAction {
-    /// Triggered when the user enters the completion view with a current query as prefix.
-    Enter { prefix: String },
+    /// Triggered when the user enters the completion view with the current query.
+    Enter { query: String },
     /// Triggered when the user leaves the completion view.
     Leave,
     /// Triggered on user input events within the completion view, such as navigation keys.
@@ -256,8 +311,8 @@ pub fn start_completion_task(
                     let completion_view = {
                         let mut completion = shared_completion.write().await;
                         match action {
-                            CompletionAction::Enter { prefix } => {
-                                let (head_item, load_progress) = completion.enter(&prefix).await;
+                            CompletionAction::Enter { query } => {
+                                let (head_item, load_progress) = completion.enter(&query).await;
                                 match head_item {
                                     Some(head) => {
                                         let message = if load_progress.is_complete {
@@ -272,7 +327,7 @@ pub fn start_completion_task(
                                     }
                                     None => {
                                         guide_action_tx
-                                            .send(GuideAction::Show(GuideMessage::NoSuggestionFound(prefix)))
+                                            .send(GuideAction::Show(GuideMessage::NoSuggestionFound(query)))
                                             .await?;
                                         shared_ctx.set_active_index(Index::QueryEditor).await;
                                         completion.clear_session_state();
