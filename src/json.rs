@@ -17,8 +17,12 @@ pub async fn get_all_paths(
     max_streams: Option<usize>,
 ) -> anyhow::Result<impl Iterator<Item = String>> {
     let stream = deserialize(json_str, max_streams)?;
-    let paths = jsonz::get_all_paths(stream.iter()).collect::<Vec<_>>();
-    Ok(paths.into_iter())
+    Ok(paths_of(&stream).into_iter())
+}
+
+/// Enumerate all JSON paths reachable in the given parsed values.
+pub fn paths_of(values: &[serde_json::Value]) -> Vec<String> {
+    jsonz::get_all_paths(values.iter()).collect()
 }
 
 /// Deserialize JSON string into a vector of serde_json::Value.
@@ -86,4 +90,55 @@ pub fn run_jaq(
     }
 
     Ok(ret)
+}
+
+/// Evaluate `base` against the already-parsed input stream, then enumerate the
+/// JSON paths of the result. Used for context-aware completion after a pipe:
+/// suggestions are relative to the output of the base expression rather than the
+/// root document. Takes a pre-parsed stream so callers can cache deserialization.
+pub fn relative_paths(base: &str, stream: &[serde_json::Value]) -> anyhow::Result<Vec<String>> {
+    let intermediate = run_jaq(base, stream)?;
+    Ok(paths_of(&intermediate))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(s: &str) -> Vec<serde_json::Value> {
+        deserialize(s, None).unwrap()
+    }
+
+    #[test]
+    fn root_paths_use_dot_and_index_notation() {
+        let mut p = paths_of(&parse(r#"{"foo": {"bar": 1}, "qux": [10, 20]}"#));
+        p.sort();
+        assert_eq!(p, [".", ".foo", ".foo.bar", ".qux", ".qux[0]", ".qux[1]"]);
+    }
+
+    #[test]
+    fn relative_paths_are_relative_to_base_output() {
+        let stream = parse(r#"{"foo": {"bar": 1, "baz": 2}, "qux": 9}"#);
+        let mut p = relative_paths(".foo", &stream).unwrap();
+        p.sort();
+        // Keys of `.foo`, not of the root document (no `.qux`).
+        assert_eq!(p, [".", ".bar", ".baz"]);
+    }
+
+    #[test]
+    fn relative_paths_descend_into_array_elements() {
+        // `.items[] | .` — the element-relative case (map/select interiors).
+        let stream = parse(r#"{"items": [{"name": "a", "qty": 1}]}"#);
+        let mut p = relative_paths(".items[]", &stream).unwrap();
+        p.sort();
+        assert_eq!(p, [".", ".name", ".qty"]);
+    }
+
+    #[test]
+    fn relative_paths_errors_on_invalid_base() {
+        let stream = parse(r#"{"foo": 1}"#);
+        // An incomplete/invalid base expression must surface as an error so the
+        // caller can fall back to offering no suggestions rather than crashing.
+        assert!(relative_paths("this is not jq (", &stream).is_err());
+    }
 }
