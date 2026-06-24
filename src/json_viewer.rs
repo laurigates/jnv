@@ -111,12 +111,17 @@ impl JsonViewer {
                 (guide, Some(self.state.create_graphemes(area.0, area.1)))
             }
             Err(e) => {
+                // Keep the view stable on the last successful result.
                 self.show_last_good();
 
-                (
-                    Some(GuideMessage::JqFailed(e.to_string())),
-                    Some(self.state.create_graphemes(area.0, area.1)),
-                )
+                // An incomplete/invalid filter is the normal state while typing,
+                // so stay quiet about it; only surface genuine runtime errors.
+                let guide = match e {
+                    json::JaqError::Invalid(_) => None,
+                    json::JaqError::Execution(msg) => Some(GuideMessage::JqFailed(msg)),
+                };
+
+                (guide, Some(self.state.create_graphemes(area.0, area.1)))
             }
         }
     }
