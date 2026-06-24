@@ -37,6 +37,7 @@ mod runtime_tasks;
 mod stdout_redirect;
 use stdout_redirect::StdoutRedirect;
 mod utils;
+mod vi;
 
 /// JSON navigator and interactive filter leveraging jq
 #[derive(Parser)]
@@ -229,6 +230,7 @@ async fn main() -> anyhow::Result<()> {
         config.editor.on_defocus,
         // TODO: remove clones
         config.keybinds.on_editor.clone(),
+        config.editor.vi,
     );
 
     // Redirects stdout to prevent interference with TUI interface.
