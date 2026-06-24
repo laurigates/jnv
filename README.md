@@ -40,6 +40,8 @@ and [jiq](https://github.com/fiatjaf/jiq).
 - Hint message to evaluate the filter
 - Result summary showing the current result's type and length
   (e.g. `object · 3 keys`) in the status line
+- Keeps the last successful result visible when a query returns null or fails,
+  so the view stays stable while you fix the filter
 
 ## Installation
 
