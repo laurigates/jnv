@@ -32,6 +32,10 @@ pub enum RenderTrigger {
 pub struct JsonViewer {
     state: jsonstream::State,
     json: Vec<serde_json::Value>,
+    /// The most recent non-null successful query result. Used to keep the view
+    /// stable when a later query returns null or fails, instead of resetting to
+    /// the whole input document. Empty until the first successful result.
+    last_good: Vec<serde_json::Value>,
     keybinds: JsonViewerKeybinds,
 }
 
@@ -91,19 +95,21 @@ impl JsonViewer {
     ) -> (Option<GuideMessage>, Option<StyledGraphemes>) {
         match json::run_jaq(&input, &self.json) {
             Ok(ret) => {
-                let mut guide = None;
-                if ret.iter().all(|val| *val == Value::Null) {
-                    guide = Some(GuideMessage::JqReturnedNull(input));
-
-                    self.state.stream = JsonStream::new(self.json.iter());
+                // `all` is vacuously true for an empty result, so a filter that
+                // produces nothing is treated like null: keep the view stable.
+                let guide = if ret.iter().all(|val| *val == Value::Null) {
+                    self.show_last_good();
+                    Some(GuideMessage::JqReturnedNull(input))
                 } else {
-                    self.state.stream = JsonStream::new(ret.iter());
-                }
+                    self.last_good = ret;
+                    self.state.stream = JsonStream::new(self.last_good.iter());
+                    None
+                };
 
                 (guide, Some(self.state.create_graphemes(area.0, area.1)))
             }
             Err(e) => {
-                self.state.stream = JsonStream::new(self.json.iter());
+                self.show_last_good();
 
                 (
                     Some(GuideMessage::JqFailed(e.to_string())),
@@ -111,6 +117,16 @@ impl JsonViewer {
                 )
             }
         }
+    }
+
+    /// Point the view at the most recent successful result, falling back to the
+    /// original input document if no query has succeeded yet.
+    fn show_last_good(&mut self) {
+        self.state.stream = if self.last_good.is_empty() {
+            JsonStream::new(self.json.iter())
+        } else {
+            JsonStream::new(self.last_good.iter())
+        };
     }
 }
 
@@ -158,6 +174,7 @@ pub async fn initialize(
 
     Ok(Arc::new(Mutex::new(JsonViewer {
         json: input_stream,
+        last_good: Vec::new(),
         state,
         keybinds,
     })))
