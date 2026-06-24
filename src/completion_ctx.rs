@@ -64,6 +64,38 @@ pub fn analyze(query: &str) -> CompletionCtx {
     }
 }
 
+/// Result of cursor-aware segmentation.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Segments {
+    /// Expression to evaluate (empty => root).
+    pub base: String,
+    /// Text left of the cursor, up to the start of the segment being completed.
+    pub preserved_prefix: String,
+    /// The token being completed (left of the cursor, after the segment start).
+    pub segment: String,
+    /// Text right of the cursor, preserved verbatim.
+    pub suffix: String,
+}
+
+/// Segment a query for completion at byte offset `cursor` (must be on a char
+/// boundary — guaranteed by the char→byte conversion at the call site).
+/// Analyzes only the text left of the cursor; the right side is preserved.
+///
+/// Cursor-at-end (`cursor == query.len()`, the common case) makes `left ==
+/// query` and `suffix == ""`, so behavior is byte-identical to analyzing the
+/// whole query — regression-safe.
+pub fn segment_at_cursor(query: &str, cursor: usize) -> Segments {
+    let left = &query[..cursor];
+    let suffix = query[cursor..].to_string();
+    let ctx = analyze(left); // token-tree segmentation, unchanged
+    Segments {
+        base: ctx.base,
+        preserved_prefix: left[..ctx.segment_start].to_string(),
+        segment: left[ctx.segment_start..].to_string(),
+        suffix,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,6 +143,43 @@ mod tests {
         assert!(
             failures.is_empty(),
             "{} segmentation cases failed",
+            failures.len()
+        );
+    }
+
+    #[test]
+    fn cursor_table() {
+        // (query, cursor byte offset, expected base, expected segment, expected suffix)
+        let cases = [
+            // cursor at end ≡ analyzing the whole query (regression proof)
+            (".foo | .ba", 10, ".foo", ".ba", ""),
+            // mid-line within the first token: suffix preserved verbatim
+            (".foo | .ba", 4, "", ".foo", " | .ba"),
+            // cursor mid-pipe: only the left segment is analyzed
+            (".a | .b | .c", 7, ".a", ".b", " | .c"),
+            // cursor at 0 / empty query
+            ("", 0, "", "", ""),
+            (".foo", 0, "", "", ".foo"),
+            // multi-byte suffix preserved (boundary-safe slice)
+            (".a | .b café", 7, ".a", ".b", " café"),
+        ];
+        let mut failures = vec![];
+        for (q, cursor, want_base, want_seg, want_suffix) in cases {
+            let seg = segment_at_cursor(q, cursor);
+            if seg.base != want_base || seg.segment != want_seg || seg.suffix != want_suffix {
+                failures.push(format!(
+                    "query {q:?} @ {cursor}: got base={:?} seg={:?} suffix={:?}, \
+                     want base={:?} seg={:?} suffix={:?}",
+                    seg.base, seg.segment, seg.suffix, want_base, want_seg, want_suffix
+                ));
+            }
+        }
+        for f in &failures {
+            eprintln!("FAIL: {f}");
+        }
+        assert!(
+            failures.is_empty(),
+            "{} cursor segmentation cases failed",
             failures.len()
         );
     }
