@@ -22,6 +22,8 @@ pub enum GuideMessage {
     JqFailed(String),
     /// Type/length summary of the current jq result (e.g. `object · 3 keys`).
     ResultSummary(String),
+    /// The query is empty, so the full input is shown unfiltered.
+    NoFilter,
 }
 
 /// Represent an action to be performed on the guide.
@@ -70,6 +72,9 @@ fn message_to_state(message: GuideMessage) -> status::State {
         }
         GuideMessage::ResultSummary(summary) => {
             status::State::new(format!("result: {summary}"), Severity::Success)
+        }
+        GuideMessage::NoFilter => {
+            status::State::new("no filter — showing full input", Severity::Success)
         }
     }
 }
