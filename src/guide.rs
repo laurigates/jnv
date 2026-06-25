@@ -79,6 +79,31 @@ fn message_to_state(message: GuideMessage) -> status::State {
     }
 }
 
+/// A guide state that occupies exactly one (blank) row.
+///
+/// Used to reserve the guide line when there is no message to show, so the
+/// pane never collapses to zero rows and the panes below it stay put.
+fn blank_line() -> status::State {
+    status::State::new(" ", Severity::Success)
+}
+
+/// Graphemes for the guide pane's initial state.
+///
+/// With hints enabled this reserves one blank row so the guide line is present
+/// from the first frame — otherwise the first message would shift the panes
+/// below it. With `--no-hint` the guide is permanently empty.
+pub fn initial_graphemes(
+    no_hint: bool,
+    width: u16,
+    height: u16,
+) -> promkit_widgets::core::grapheme::StyledGraphemes {
+    if no_hint {
+        Default::default()
+    } else {
+        blank_line().create_graphemes(width, height)
+    }
+}
+
 /// Copy the given content to the clipboard and return a message indicating the result.
 pub fn copy_to_clipboard_message(content: &str) -> GuideMessage {
     match Clipboard::new() {
@@ -106,7 +131,13 @@ pub fn start_guide_task(
                         Default::default()
                     } else {
                         match action {
-                            GuideAction::Clear => status::State::default().create_graphemes(area.0, area.1),
+                            // Render a single blank line rather than an empty
+                            // state. An empty state produces zero rows, which the
+                            // renderer drops entirely (terminal.rs filters out
+                            // empty panes), collapsing the guide line and shifting
+                            // the JSON viewer up — and back down when a message
+                            // reappears. Reserving one row keeps the layout stable.
+                            GuideAction::Clear => blank_line().create_graphemes(area.0, area.1),
                             GuideAction::Show(message) => message_to_state(message).create_graphemes(area.0, area.1),
                         }
                     };
