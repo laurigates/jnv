@@ -93,6 +93,20 @@ impl JsonViewer {
         area: (u16, u16),
         input: String,
     ) -> (Option<GuideMessage>, Option<StyledGraphemes>) {
+        // An empty (or whitespace-only) query means "no filter": reset to the
+        // full input document fresh. jaq rejects an empty program as invalid, so
+        // without this guard an explicit clear (e.g. Ctrl+U) is treated like an
+        // incomplete filter mid-typing — falling back to the stale last result,
+        // or on a fresh view silently dumping the whole input with no hint.
+        if input.trim().is_empty() {
+            self.last_good = Vec::new();
+            self.state.stream = JsonStream::new(self.json.iter());
+            return (
+                Some(GuideMessage::NoFilter),
+                Some(self.state.create_graphemes(area.0, area.1)),
+            );
+        }
+
         match json::run_jaq(&input, &self.json) {
             Ok(ret) => {
                 // `all` is vacuously true for an empty result, so a filter that
